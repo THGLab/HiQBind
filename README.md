@@ -53,13 +53,13 @@ Due to license agreement, we are not able to directly provide the optimized PDBB
 ```bash
 cd workflow
 mkdir ../raw_data
-python procees.py -i ../pre_process/hiq_sm.csv -d ../raw_data/hiqbind_sm
-python procees.py -i ../pre_process/hiq_poly.csv -d ../raw_data/hiqbind_poly --poly
+python process.py -i ../pre_process/hiq_sm.csv -d ../raw_data/hiqbind_sm
+python process.py -i ../pre_process/hiq_poly.csv -d ../raw_data/hiqbind_poly --poly
 ```
 Alternatively, for processing PDBBind, use these codes instead.
 ```bash
-python procees.py -i ../pre_process/PDBBind_sm.csv -d ../raw_data/pdbbind_opt_sm
-python procees.py -i ../pre_process/PDBBind_poly.csv -d ../raw_data/pdbbind_opt_poly --poly
+python process.py -i ../pre_process/PDBBind_sm.csv -d ../raw_data/pdbbind_opt_sm
+python process.py -i ../pre_process/PDBBind_poly.csv -d ../raw_data/pdbbind_opt_poly --poly
 ```
 This will take about one day on a 256-core CPU. If you have more nodes, considering split the input csv file to several chunks and run them in parallel. When the workflow finish, in the output directory, each PDBID will have a folder and if the workflow succeed on this PDBID, there will be a file named `done.tag` under its folder, otherwise ther will be a file named `err`. 
 + **Step 4**: Run the `gather.py` to create metadata files, for example:
