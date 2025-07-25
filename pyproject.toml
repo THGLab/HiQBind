@@ -19,7 +19,3 @@ homepage = "https://github.com/THGLab/HiQBind"
 repository = "https://github.com/THGLab/HiQBind"
 
 [tool.setuptools.packages.find]
-where = ["workflow"]
-
-[tool.setuptools]
-include-package-data = true
