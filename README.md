@@ -18,6 +18,19 @@ We recommend using conda environment to install dependencies of this library. Pl
 conda env create -f env.yml
 conda activate hiqbind
 ```  
+If you wish to use HiQBind within a Python script, you can then install HiQBind into the same conda environment by running:
+```bash
+pip install .
+```
+Once installed, you can then directly import functions from the HiQBind workflow:
+```Python
+import hiqbind
+```
+This can be useful for using modular pieces from the HiQBind codebase:
+```Python
+from hiqbind.fix_ligand import fix_ligand
+fix_ligand("benzene.sdf", "c1ccccc1", "benzene_fixed.sdf")
+```
 
 ## Code availability
 
