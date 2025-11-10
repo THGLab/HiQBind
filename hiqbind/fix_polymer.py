@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from rcsb import download_pdb_cif
+from .rcsb import download_pdb_cif
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw
 

@@ -172,3 +172,6 @@ error_fix/PDBBind*.md
 debug/
 pre_process/BindingMOAD*.csv
 pre_process/PDBBind_*.csv
+
+# mac
+.DS_Store

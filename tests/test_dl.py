@@ -2,7 +2,7 @@ from rdkit import Chem
 import sys
 sys.path.insert(0, '..')
 sys.path.insert(0, '../utils')
-from workflow.fix_ligand import run_dl
+from hiqbind.fix_ligand import run_dl
 
 
 def test_protonation(in_smi, out_smi):

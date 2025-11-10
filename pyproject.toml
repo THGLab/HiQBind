@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "HiQBind"
+version = "0.1.0"
+description = "A toolkit for binding analysis and processing workflows."
+authors = [
+    { name = "THGLab" }
+]
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.8"
+dependencies = []
+
+[project.urls]
+homepage = "https://github.com/THGLab/HiQBind"
+repository = "https://github.com/THGLab/HiQBind"
+
+[tool.setuptools.packages.find]

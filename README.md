@@ -16,13 +16,26 @@ The HiQBind-WF workflow is open-sourced under MIT license. If you use this code 
 We recommend using conda environment to install dependencies of this library. Please install (or load) conda and then proceed with the following commands:
 ```bash
 conda env create -f env.yml
-conda activate hiqbind-wf
+conda activate hiqbind
 ```  
+If you wish to use HiQBind within a Python script, you can then install HiQBind into the same conda environment by running:
+```bash
+pip install .
+```
+Once installed, you can then directly import functions from the HiQBind workflow:
+```Python
+import hiqbind
+```
+This can be useful for using modular pieces from the HiQBind codebase:
+```Python
+from hiqbind.fix_ligand import fix_ligand
+fix_ligand("benzene.sdf", "c1ccccc1", "benzene_fixed.sdf")
+```
 
 ## Code availability
 
 + `pre_process/`: Scripts to prepare inputs for HiQBind dataset creation and PDBBind optimization (identifying ligands and extract binding affinity data).
-+ `workflow/`: Codes for HiQBind-WF worflow
++ `hiqbind/`: Codes for HiQBind-WF worflow
   - `dimorphite_dl`: Package to assign protonation states. We modified the `site_substructures.smarts` to make the rules easier.
   - `fix_ligand.py`: LigandFixer module
   - `fix_protein.py`: ProteinFixer module
@@ -49,9 +62,9 @@ Due to license agreement, we are not able to directly provide the optimized PDBB
 + **Step 1**: Download PDBBind index file from their official website.
 + **Step 2a**: Run `pre_process/create_pdbbind_input.ipynb` to extract binding affinity and identifying ligands for PDBBind-Opt. This will give the two csv files: `PDBBind_poly.csv` and `PDBBind_sm.csv`
 + **Step 2b**: Run `pre_process/create_hiqbind_input.ipynb` to extract binding affinity and identifying ligands for HiQBind. This will give the two csv files: `hiq_sm.csv` and `hiq_poly.csv`. Actually, we have already provided these two csv files in `pre_process` directory.
-+ **Step 3**: Go to the `workflow` and use the following command to run the workflow
++ **Step 3**: Go to the `hiqbind` and use the following command to run the workflow
 ```bash
-cd workflow
+cd hiqbind
 mkdir ../raw_data
 python process.py -i ../pre_process/hiq_sm.csv -d ../raw_data/hiqbind_sm
 python process.py -i ../pre_process/hiq_poly.csv -d ../raw_data/hiqbind_poly --poly

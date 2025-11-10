@@ -6,8 +6,8 @@ from Bio.PDB import PDBIO, Residue
 from rdkit import Chem
 from rdkit.Chem import AllChem, Draw
 
-from dimorphite_dl import dimorphite_dl as dl
-from rcsb import get_smiles_from_rcsb
+from .dimorphite_dl import dimorphite_dl as dl
+from .rcsb import get_smiles_from_rcsb
 from openbabel import openbabel
 
 
