@@ -56,6 +56,31 @@ def download_file(url: str, fp: os.PathLike, overwrite: bool = False, raise_erro
                 msg = f"Fail to download {url}. Error: {e}"
 
 
+def download_file_bioassembly(url: str, fp: os.PathLike, overwrite: bool = False, raise_error: bool = True, folder=None, pdb_id=None):
+    """
+    Download file from given URL
+
+    Parameters
+    ----------
+    url: str
+        URL of the file to be downloaded
+    fp: os.PathLike
+        Local path to the downloaded file
+    overwrite: bool
+        If True, will overwrite the exisiting file. 
+        If False, will skip the download process if the file exists. Default False.
+    raise_error: bool
+        If True, will raise error if the download fails. Default True.
+    """
+    download_file(url, fp, overwrite , raise_error)
+    import os, gzip, shutil
+
+    gz_path = os.path.join(folder, f"{pdb_id}-assembly1.cif.gz")
+    out_path = os.path.join(folder, f"{pdb_id}-assembly1.cif")
+
+    with gzip.open(gz_path, "rb") as f_in, open(out_path, "wb") as f_out:
+        shutil.copyfileobj(f_in, f_out)
+
 def download_pdb_cif(pdb_id: str, folder: os.PathLike, overwrite: bool = False, raise_error: bool = True):
     """
     Download a PDB & CIF file from RCSB.
@@ -74,11 +99,14 @@ def download_pdb_cif(pdb_id: str, folder: os.PathLike, overwrite: bool = False, 
     """
     # URL for the PDB file (Replace with the base URL of your choice)
     url_cif = f"https://files.rcsb.org/download/{pdb_id}.cif"
+    url_cif_bioassembly = f"https://files.rcsb.org/download/{pdb_id.upper()}-assembly1.cif.gz"
     url_pdb = f"https://files.rcsb.org/download/{pdb_id}.pdb"
     
     download_file(url_cif, os.path.join(folder, f'{pdb_id}.cif'), overwrite, raise_error)
     download_file(url_pdb, os.path.join(folder, f'{pdb_id}.pdb'), overwrite, raise_error)
-
+    # Get the symmetry cured version but the missing res modres and other bioinformatics info are all missing, so let's derive from the .cif using gemmi
+    #download_file_bioassembly(url_cif_bioassembly, os.path.join(folder, f'{pdb_id}-assembly1.cif.gz'), overwrite, raise_error, folder, pdb_id)
+    
 
 def get_smiles_from_rcsb(comp_id: str):
     """
