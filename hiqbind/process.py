@@ -16,14 +16,14 @@ from rdkit import RDLogger
 RDLogger.DisableLog('rdApp.*')
 
 import openmm.app as app
+import json
+#from hiqbind.fix_protein import StandardizedPDBFixer, convert_to_three_letter_seq, convert_to_seqres , Structure
+from hiqbind.fix_ligand import get_reference_smi, read_by_obabel, write_sdf, LigandFixException, fix_ligand
 
-from fix_protein import *
-from fix_ligand import *
-from fix_polymer import *
-from rcsb import *
-# from refine import *
-
-
+from hiqbind.rcsb import download_pdb_cif, get_rcsb_data, download_ligand_sdf
+from hiqbind.fix_protein import StandardizedPDBFixer, convert_to_three_letter_seq, convert_to_seqres , Structure
+from hiqbind.bioassembly import write_biological_assembly_pdb_gemmi, get_assembly_chain_map_gemmi, rewrite_assembled_pdb_header_with_chain_annotations
+from hiqbind.fix_polymer import mol_from_seq
 standardResidues = [
     'ALA', 'ASN', 'CYS', 'GLU', 'HIS', 'LEU', 'MET', 'PRO', 'THR', 'TYR',
     'ARG', 'ASP', 'GLN', 'GLY', 'ILE', 'LYS', 'PHE', 'SER', 'TRP', 'VAL',
@@ -35,6 +35,17 @@ VERBOSE = False
 
 # Ligands with elements other than this list will be discarded
 COMMON_ELEMENTS = ['H', 'C', 'N', 'O', 'F', 'P', 'S', 'Cl', 'Br', 'I']
+# 
+AMBER14_TIP3PXML_ACCEPTABLE_RESNAME = [
+        "AL", "Ag", "BA", "BR", "Be", "CA", "CD", "CE", "CL", "CO", "CR", "CS",
+        "CU", "Ce", "Cr", "Dy", "EU", "EU3", "Er", "F", "FE", "FE2", "GD3", "HG",
+        "Hf", "IN", "IOD", "K", "LA", "LI", "LU", "MG", "MN", "NA", "NI", "Nd",
+        "PB", "PD", "PR", "PT", "Pu", "RB", "Ra", "SM", "SR", "Sm", "Sn", "TB",
+        "Th", "Tl", "Tm", "U4+", "V2+", "Y", "YB2", "ZN", "Zr", "HOH"
+    ]
+PDB_COVALENT_HETATM = [
+
+]
 # Ligands with less than 4 heavy atoms will be discarded
 MAX_HEAVY_ATOMS = 4
 # Ligands with distances < 2.0 Angstrom to the protein will be discarded
@@ -394,6 +405,11 @@ def find_ligand_residues(topology: app.Topology, ligand_chain: str, ligand_resid
     return list(residues)
 
 
+
+        
+
+
+
 def process_everything(
     pdb_id: str, 
     ligand_id: Union[None, str, List[str]] = None, 
@@ -402,7 +418,11 @@ def process_everything(
     binding_cutoff: float = BINDING_CUTOFF, 
     hetatm_cutoff: float = HETATM_CUTOFF,
     find_connected_ligand_residues: bool = True,
-):
+    do_refine_structure_with_ligand_plus_hetatm: bool = False,
+    do_refine_structure_with_ligand_plus_hetatm_assembly:bool = False,
+    do_refine_structure_with_ligand_plus_assembly:bool = False,
+    assembly_name:int = 1
+    ):
     """
     Run process workflow
     """
@@ -414,11 +434,18 @@ def process_everything(
     if not os.path.isdir(folder):
         os.mkdir(folder)
 
+    # ====================
+    # RCSB 
+    # ======================
+
     download_pdb_cif(pdb_id, folder)
     get_rcsb_data(pdb_id, os.path.join(folder, 'rcsb_data.json'))
     
     pdb_file = os.path.join(folder, f'{pdb_id}.pdb')
     cif_file = os.path.join(folder, f'{pdb_id}.cif')
+    # =============================
+    # Informatio
+    # =============================
 
     # read in the key properties from the original pdb and cif file
     key_properties, interchain_ss, modres_info, connect = extract_pdb_information(pdb_file)
@@ -428,7 +455,11 @@ def process_everything(
         sequences[row['chain_id']] = convert_to_three_letter_seq(row['pdbx_seq_one_letter_code'])
     with open(os.path.join(folder, 'res_num_mapping.json'), 'w') as f:
         json.dump(res_num_mapping, f, indent=4)
-    
+
+    # =================================
+    # Read the structure file
+    # ==================================
+    from openmm import app
     # OpenMM will change residue namings
     app.PDBFile._loadNameReplacementTables()
     app.PDBFile._residueNameReplacements = {k:v for k, v in app.PDBFile._residueNameReplacements.items() if k == v}
@@ -467,7 +498,10 @@ def process_everything(
 
     ligand_residues_list = []
     for chain, residue_numbers in ligand_info:
-        ligand_residues = find_ligand_residues(struct.topology, chain, residue_numbers, max_num_residues=MAX_NUM_RES_POLY, find_connected=find_connected_ligand_residues)
+        ligand_residues = find_ligand_residues(
+            struct.topology, chain, residue_numbers, 
+            max_num_residues=MAX_NUM_RES_POLY, 
+            find_connected=find_connected_ligand_residues)
         ligand_residues_list.append(ligand_residues)
     
     
@@ -551,8 +585,12 @@ def process_everything(
         positions = struct.get_positions_by_residues(ligand_residues + include['polymer'])
         for residue in hetero_residues:
             het_positions = struct.get_positions_by_residues([residue])
-            if np.min(cdist(positions, het_positions)) * 10 < hetatm_cutoff:
-                include['hetatm'].append(residue)
+            if np.min(cdist(positions, het_positions)) * 10 > hetatm_cutoff:
+                continue
+            if residue.name not in AMBER14_TIP3PXML_ACCEPTABLE_RESNAME:
+                print(f"WARNING. hetatm (not ligand) {residue.name} was excluded in {pdb_id}.")
+                continue
+            include['hetatm'].append(residue)
         # Record ligand
         include['ligand'] = ligand_residues
         
@@ -592,7 +630,9 @@ def process_everything(
                     ref_name = 'seq:' + ','.join(seq)
             except:
                 ref_smi = None
-
+        # =================================
+        # Ligand as a chemical
+        # =================================
         if ref_smi:
             with open(os.path.join(subfolder, f'ref.smi'), 'w') as f:
                 f.write(ref_smi + ' ' + ref_name)
@@ -634,8 +674,16 @@ def process_everything(
         # all 
         chain_properties, ssbond_lines = extract_chain_specific_information(key_properties, chains_include)
         all_pdb = os.path.join(subfolder, f'{basename}_protein_hetatm.pdb')
-        struct.select_residues(include['polymer'] + include['hetatm']).save(all_pdb, header='\n'.join(chain_properties))
-    
+        all_header = seqres + modres + [
+            line for line in chain_properties
+            if (not line.startswith('SEQRES')) and (not line.startswith('MODRES'))
+        ]
+        struct.select_residues(include['polymer'] + include['hetatm']).save(
+            all_pdb,
+            header='\n'.join(all_header),
+            res_num_mapping=res_num_mapping
+        )
+        
     # Record alignment info
     alignment_info = alignment_info[alignment_info['chain_id'].isin(all_chains_to_include)]
     diff_info = diff_info[diff_info['chain_id'].isin(all_chains_to_include)]
@@ -643,32 +691,232 @@ def process_everything(
     diff_info.to_csv(os.path.join(folder, 'diff_info.csv'), index=None)
 
     fix_ligands_in_folder(folder)
+
     refine_structure_with_ligand(folder)
 
     fp = open(os.path.join(folder, 'done.tag'), 'w')
     fp.close()
 
+    # ====================
+    # Optional hetatm, assembly, hetatm-assembly
+    # ======================
+    if do_refine_structure_with_ligand_plus_assembly:
+        _, _ = refine_structure_with_ligand_plus_assembly(folder, assembly_name=f'{assembly_name}')
+
+    if do_refine_structure_with_ligand_plus_hetatm:
+        refine_structure_with_ligand_plus_hetatm(folder)
+
+    if do_refine_structure_with_ligand_plus_hetatm_assembly:
+        _, count_presence_hetatm_assembly = refine_structure_with_ligand_plus_hetatm_assembly(folder, assembly_name=f'{assembly_name}')
+
+        json_file = os.path.join(folder, 'stat_indicate_hetatm_bioassembly.json')
+        with open(json_file, "w") as f:
+            json.dump(count_presence_hetatm_assembly, f, indent=2)
+
+
+
+def detect_tip3_residues_in_pdb(pdb_file):
+    from Bio.PDB import PDBParser
+    import os
+
+
+
+    out = {name: 0 for name in AMBER14_TIP3PXML_ACCEPTABLE_RESNAME}
+
+    parser = PDBParser(QUIET=True)
+    structure = parser.get_structure(os.path.basename(pdb_file), pdb_file)
+
+    present_resnames = set()
+    for residue in structure.get_residues():
+        present_resnames.add(residue.get_resname().strip())
+
+    for name in out:
+        if name in present_resnames:
+            out[name] = 1
+
+    return out
 
 def refine_structure_with_ligand(folder):
     pdb_id = os.path.basename(folder)
     res_num_mapping = {}
+    saved_states = []
     with open(os.path.join(folder, 'res_num_mapping.json')) as f:
         for chain, mapping in json.load(f).items():
             res_num_mapping[chain] = {int(k): v for k, v in mapping.items()}
     
     for protein_pdb in glob.glob(os.path.join(folder, '*/*_protein.pdb')):
         ligand_sdf = protein_pdb.replace("_protein.pdb", "_ligand_fixed.sdf")
+        output_protein = protein_pdb.replace("_protein.pdb", "_protein_refined.pdb")
+        output_dir = os.path.dirname(protein_pdb)
+        bundle_dir = output_dir + "/refine_structure_with_ligand/"
         if VERBOSE:
             print(f'Processing {protein_pdb}')
         fixer = StandardizedPDBFixer(protein_pdb=protein_pdb, ligand_sdf=ligand_sdf, pdb_id=pdb_id, verbose=False)
-        fixer.runFixWorkflow(
-            output_protein=protein_pdb.replace("_protein.pdb", "_protein_refined.pdb"),
+
+        os.makedirs(bundle_dir, exist_ok=True)
+        result = fixer.runFixWorkflow(
+            output_protein=output_protein,
             output_ligand=ligand_sdf.replace("_fixed.sdf", "_refined.sdf"),
             res_num_mapping=res_num_mapping,
             refine_positions=True,
-            skip_long_missing_residues=MAX_ADD_MISSING_RES
+            skip_long_missing_residues=MAX_ADD_MISSING_RES,
+            save_refinement_bundle=True,
+            refinement_bundle_dir=bundle_dir,
+        )
+        
+    return saved_states
+
+def refine_structure_with_ligand_plus_assembly(folder, assembly_name='1'):
+    pdb_id = os.path.basename(folder)
+    saved_states = []
+    cif_file = os.path.join(folder, f'{pdb_id}.cif')
+    count_presence_hetatm_assembly = {"has_new_assembled_chain" : 0}
+    for protein_pdb in glob.glob(os.path.join(folder, '*/*_protein.pdb')):
+        ligand_sdf = protein_pdb.replace("_protein.pdb", "_ligand_fixed.sdf")
+        assembly_pdb = protein_pdb.replace("_protein.pdb", f"_protein_assembly{assembly_name}.pdb")
+        output_protein = protein_pdb.replace("_protein.pdb", f"_protein_assembly{assembly_name}_refined.pdb")
+        output_dir = os.path.dirname(protein_pdb)
+        bundle_dir = output_dir + "/refine_structure_with_ligand_plus_assembly/"
+
+        out_st, has_new_assembled_chain = write_biological_assembly_pdb_gemmi(
+            cif_file,
+            protein_pdb,
+            assembly_pdb,
+            assembly_name=assembly_name,
+            chain_naming='Short',
+            merge_dist=0.0,
         )
 
+
+        chain_map = get_assembly_chain_map_gemmi(
+            cif_file,
+            protein_pdb,
+            assembly_pdb,
+            assembly_name=assembly_name,
+        )
+        
+        rewrite_assembled_pdb_header_with_chain_annotations(
+            protein_pdb,
+            assembly_pdb,
+            chain_map,
+        ) 
+        
+        
+        fixer = StandardizedPDBFixer(
+            protein_pdb=assembly_pdb,
+            ligand_sdf=ligand_sdf,
+            pdb_id=pdb_id,
+            verbose=False,
+        )
+
+        result = fixer.runFixWorkflow(
+            output_protein=output_protein,
+            output_ligand=ligand_sdf.replace("_fixed.sdf", f"_assembly{assembly_name}_refined.sdf"),
+            res_num_mapping=None,
+            refine_positions=True,
+            skip_long_missing_residues=MAX_ADD_MISSING_RES*20,
+            save_refinement_bundle=True,
+            refinement_bundle_dir=bundle_dir,
+        )
+        if has_new_assembled_chain:
+            count_presence_hetatm_assembly['has_new_assembled_chain'] +=1
+        count_presence_hetatm_assembly.update(detect_tip3_residues_in_pdb(output_protein))
+        saved_states.append(result)
+
+    return saved_states, count_presence_hetatm_assembly
+
+def refine_structure_with_ligand_plus_hetatm(folder):
+    pdb_id = os.path.basename(folder)
+    res_num_mapping = {}
+    saved_states = []
+    with open(os.path.join(folder, 'res_num_mapping.json')) as f:
+        for chain, mapping in json.load(f).items():
+            res_num_mapping[chain] = {int(k): v for k, v in mapping.items()}
+
+    for protein_pdb in glob.glob(os.path.join(folder, '*/*_protein_hetatm.pdb')):
+        ligand_sdf = protein_pdb.replace("_protein_hetatm.pdb", "_ligand_fixed.sdf")
+        output_protein = protein_pdb.replace("_protein_hetatm.pdb", "_protein_hetatm_refined.pdb")
+        output_dir = os.path.dirname(protein_pdb)
+        bundle_dir = output_dir + "/refine_structure_with_ligand_plus_hetatm/"
+        if VERBOSE:
+            print(f'Processing {protein_pdb}')
+        fixer = StandardizedPDBFixer(protein_pdb=protein_pdb, 
+                                     ligand_sdf=ligand_sdf, 
+                                     pdb_id=pdb_id, 
+                                     verbose=False)
+
+
+        result = fixer.runFixWorkflow(
+            output_protein=output_protein,
+            output_ligand=ligand_sdf.replace("_fixed.sdf", "_refined.sdf"),
+            res_num_mapping=None, 
+            refine_positions=True,
+            skip_long_missing_residues=MAX_ADD_MISSING_RES,
+            save_refinement_bundle=True,
+            refinement_bundle_dir=bundle_dir,
+
+        )
+        
+    return saved_states
+
+def refine_structure_with_ligand_plus_hetatm_assembly(folder, assembly_name='1'):
+    pdb_id = os.path.basename(folder)
+    saved_states = []
+    cif_file = os.path.join(folder, f'{pdb_id}.cif')
+    count_presence_hetatm_assembly = {"has_new_assembled_chain" : 0}
+    for protein_pdb in glob.glob(os.path.join(folder, '*/*_protein_hetatm.pdb')):
+        ligand_sdf = protein_pdb.replace("_protein_hetatm.pdb", "_ligand_fixed.sdf")
+        assembly_pdb = protein_pdb.replace("_protein_hetatm.pdb", f"_protein_hetatm_assembly{assembly_name}.pdb")
+        output_protein = protein_pdb.replace("_protein_hetatm.pdb", f"_protein_hetatm_assembly{assembly_name}_refined.pdb")
+        output_dir = os.path.dirname(protein_pdb)
+        bundle_dir = output_dir + "/refine_structure_with_ligand_plus_hetatm_assembly/"
+
+        out_st, has_new_assembled_chain = write_biological_assembly_pdb_gemmi(
+            cif_file,
+            protein_pdb,
+            assembly_pdb,
+            assembly_name=assembly_name,
+            chain_naming='Short',
+            merge_dist=0.0,
+        )
+
+
+        chain_map = get_assembly_chain_map_gemmi(
+            cif_file,
+            protein_pdb,
+            assembly_pdb,
+            assembly_name=assembly_name,
+        )
+        
+        rewrite_assembled_pdb_header_with_chain_annotations(
+            protein_pdb,
+            assembly_pdb,
+            chain_map,
+        ) 
+        
+        
+        fixer = StandardizedPDBFixer(
+            protein_pdb=assembly_pdb,
+            ligand_sdf=ligand_sdf,
+            pdb_id=pdb_id,
+            verbose=False,
+        )
+
+        result = fixer.runFixWorkflow(
+            output_protein=output_protein,
+            output_ligand=ligand_sdf.replace("_fixed.sdf", f"_hetatm_assembly{assembly_name}_refined.sdf"),
+            res_num_mapping=None,
+            refine_positions=True,
+            skip_long_missing_residues=MAX_ADD_MISSING_RES*20,
+            save_refinement_bundle=True,
+            refinement_bundle_dir=bundle_dir,
+        )
+        if has_new_assembled_chain:
+            count_presence_hetatm_assembly['has_new_assembled_chain'] +=1
+        count_presence_hetatm_assembly.update(detect_tip3_residues_in_pdb(output_protein))
+        saved_states.append(result)
+
+    return saved_states, count_presence_hetatm_assembly
 
 def fix_ligands_in_folder(folder):
     # Fix Ligands
@@ -702,7 +950,7 @@ def fix_ligands_in_folder(folder):
     err_msg = '----\n'.join(f'\nError occurs when fixing {name}: \n{err_msg}' for name, err_msg in err_log)
     if err_msg:
         raise LigandFixException(err_msg)
-        
+
 
 if __name__ == "__main__":
     import warnings
@@ -717,16 +965,70 @@ if __name__ == "__main__":
     parser.add_argument('-d', '--output', dest='output', help='output directory')
     parser.add_argument('--poly', dest='poly', action='store_true', help='if polymer csv')
     parser.add_argument('--serial', dest='serial', action='store_true', help='if run serially (not in parallel)')
+
+    parser.add_argument(
+        '--binding_cutoff',
+        dest='binding_cutoff',
+        type=float,
+        default=BINDING_CUTOFF,
+        help='binding cutoff'
+    )
+    parser.add_argument(
+        '--hetatm_cutoff',
+        dest='hetatm_cutoff',
+        type=float,
+        default=HETATM_CUTOFF,
+        help='hetatm cutoff'
+    )
+    parser.add_argument(
+        '--find_connected_ligand_residues',
+        dest='find_connected_ligand_residues',
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help='whether to find connected ligand residues'
+    )
+    parser.add_argument(
+        '--do_refine_structure_with_ligand_plus_hetatm',
+        dest='do_refine_structure_with_ligand_plus_hetatm',
+        action='store_true',
+        default=False,
+        help='refine structure with ligand plus hetatm'
+    )
+    parser.add_argument(
+        '--do_refine_structure_with_ligand_plus_assembly',
+        dest='do_refine_structure_with_ligand_plus_assembly',
+        action='store_true',
+        default=False,
+        help='refine structure with ligand plus assembly'
+    )
+    parser.add_argument(
+        '--do_refine_structure_with_ligand_plus_hetatm_assembly',
+        dest='do_refine_structure_with_ligand_plus_hetatm_assembly',
+        action='store_true',
+        default=False,
+        help='refine structure with ligand plus hetatm assembly'
+    )
+
+
     input_args = parser.parse_args()
 
     dataset_dir = input_args.output
     if not os.path.isdir(dataset_dir):
         os.mkdir(dataset_dir)
+    process_kwargs = {
+        'binding_cutoff': input_args.binding_cutoff,
+        'hetatm_cutoff': input_args.hetatm_cutoff,
+        'find_connected_ligand_residues': input_args.find_connected_ligand_residues,
+        'do_refine_structure_with_ligand_plus_hetatm': input_args.do_refine_structure_with_ligand_plus_hetatm,
+        'do_refine_structure_with_ligand_plus_hetatm_assembly': input_args.do_refine_structure_with_ligand_plus_hetatm_assembly,
+        'do_refine_structure_with_ligand_plus_assembly': input_args.do_refine_structure_with_ligand_plus_assembly,
+    }
 
     def wrap_process_wf(args):
         pdbid, ligand_ccd, ligand_info = args
         try:
-            process_everything(pdbid, ligand_ccd, ligand_info, dataset_dir)
+            process_everything(pdbid, ligand_ccd, ligand_info, dataset_dir, 
+                               **process_kwargs)
         except Exception as e:
             # raise e
             errmsg = traceback.format_exc()
@@ -739,6 +1041,8 @@ if __name__ == "__main__":
     if not input_args.poly:
         args = []
         for pdbid, subdf in df.groupby('PDBID'):
+            #if pdbid != '1ork':
+            #    continue
             ligand_info, ligand_ccd = [], None
             for _, row in subdf.iterrows():
                 chain, resnum = row['Ligand chain'], row['Ligand residue sequence number']
@@ -751,6 +1055,7 @@ if __name__ == "__main__":
                 ligand_ccd = subdf['Ligand CCD'].unique().tolist()
             arg = (pdbid, ligand_ccd, ligand_info)
             args.append(arg)
+        args = sorted(args)[:]
     else:
         args = [(pdbid, None, None) for pdbid in df['PDBID'].unique()]
 

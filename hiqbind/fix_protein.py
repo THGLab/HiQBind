@@ -98,7 +98,7 @@ class Structure:
         modeller.delete(to_delete)
         return Structure(modeller.topology, modeller.positions)
 
-    def save(self, file, select: Optional[Select] = None, keepIds: bool = True, header: str = '', res_num_mapping: Optional[Dict[str, Dict[int, str]]] = None):
+    def save(self, file, select=None, keepIds=True, header='', res_num_mapping=None):
         if isinstance(file, str) or isinstance(file, os.PathLike):
             fp = open(file, 'w')
             self.save(fp, select, keepIds, header, res_num_mapping)
@@ -111,12 +111,18 @@ class Structure:
                 top, pos = self.topology, self.positions
 
             if res_num_mapping:
+                reverse_mapping = {}
+                for chain, mapping in res_num_mapping.items():
+                    reverse_mapping[chain] = {v: k for k, v in mapping.items()}
+
                 for residue in top.residues():
                     chain = residue.chain.id
-                    new_res_num = [k for k, v in res_num_mapping[chain].items() if v == f"{residue.id}{residue.insertionCode}".strip()][0]
-                    residue.id = str(new_res_num)
-                    residue.insertionCode = " "
-            
+                    old_id = f"{residue.id}{residue.insertionCode}".strip()
+
+                    if (chain in reverse_mapping) and (old_id in reverse_mapping[chain]):
+                        residue.id = str(reverse_mapping[chain][old_id])
+                        residue.insertionCode = " "
+
             app.PDBFile.writeHeader(top, file)
             if header:
                 print(header[:-1] if header[-1] == '\n' else header, file=file)
@@ -198,6 +204,118 @@ def to_quantity(ndarray):
     return quantity
 
 
+def save_openmm_refinement_bundle(bundle_dir, topology, positions, system, integrator, state, metadata=None):
+    import json
+
+    os.makedirs(bundle_dir, exist_ok=True)
+
+    topology_pdb = os.path.join(bundle_dir, 'topology.pdb')
+    system_xml = os.path.join(bundle_dir, 'system.xml')
+    integrator_xml = os.path.join(bundle_dir, 'integrator.xml')
+    state_xml = os.path.join(bundle_dir, 'state.xml')
+    metadata_json = os.path.join(bundle_dir, 'metadata.json')
+
+    with open(topology_pdb, 'w') as f:
+        app.PDBFile.writeFile(topology, positions, f, keepIds=True)
+
+    with open(system_xml, 'w') as f:
+        f.write(mm.XmlSerializer.serialize(system))
+
+    with open(integrator_xml, 'w') as f:
+        f.write(mm.XmlSerializer.serialize(integrator))
+
+    with open(state_xml, 'w') as f:
+        f.write(mm.XmlSerializer.serialize(state))
+
+    if metadata is None:
+        metadata = {}
+    else:
+        metadata = dict(metadata)
+
+    metadata.update({
+        'topology_pdb': os.path.basename(topology_pdb),
+        'system_xml': os.path.basename(system_xml),
+        'integrator_xml': os.path.basename(integrator_xml),
+        'state_xml': os.path.basename(state_xml),
+        'num_atoms': int(topology.getNumAtoms()),
+        'num_residues': int(topology.getNumResidues()),
+    })
+
+    with open(metadata_json, 'w') as f:
+        json.dump(metadata, f, indent=2, sort_keys=True)
+
+    return {
+        'bundle_dir': bundle_dir,
+        'topology_pdb': topology_pdb,
+        'system_xml': system_xml,
+        'integrator_xml': integrator_xml,
+        'state_xml': state_xml,
+        'metadata_json': metadata_json,
+        'num_atoms': int(topology.getNumAtoms()),
+        'num_residues': int(topology.getNumResidues()),
+    }
+
+
+
+def load_openmm_refinement_bundle(bundle_dir, platform_name=None, platform_properties=None, set_state=True):
+    import json
+
+    metadata_json = os.path.join(bundle_dir, 'metadata.json')
+    with open(metadata_json) as f:
+        metadata = json.load(f)
+
+    topology_pdb = os.path.join(bundle_dir, metadata['topology_pdb'])
+    system_xml = os.path.join(bundle_dir, metadata['system_xml'])
+    integrator_xml = os.path.join(bundle_dir, metadata['integrator_xml'])
+    state_xml = os.path.join(bundle_dir, metadata['state_xml'])
+
+    pdb = app.PDBFile(topology_pdb)
+
+    with open(system_xml) as f:
+        system = mm.XmlSerializer.deserialize(f.read())
+
+    with open(integrator_xml) as f:
+        integrator = mm.XmlSerializer.deserialize(f.read())
+
+    with open(state_xml) as f:
+        state = mm.XmlSerializer.deserialize(f.read())
+
+    if platform_name is None:
+        sim = app.Simulation(pdb.topology, system, integrator)
+    else:
+        platform = mm.Platform.getPlatformByName(platform_name)
+        if platform_properties is None:
+            sim = app.Simulation(pdb.topology, system, integrator, platform)
+        else:
+            sim = app.Simulation(pdb.topology, system, integrator, platform, platform_properties)
+
+    if set_state:
+        try:
+            sim.context.setState(state)
+        except Exception:
+            sim.context.setPositions(pdb.positions)
+            try:
+                sim.context.setPositions(state.getPositions())
+            except Exception:
+                pass
+            try:
+                sim.context.setVelocities(state.getVelocities())
+            except Exception:
+                pass
+    else:
+        sim.context.setPositions(pdb.positions)
+
+    return {
+        'metadata': metadata,
+        'topology': pdb.topology,
+        'positions': pdb.positions,
+        'system': system,
+        'integrator': integrator,
+        'state': state,
+        'simulation': sim,
+    }
+
+
 class StandardizedPDBFixer(PDBFixer):
     """
     A class to fix standarized PDB file. Here the standardized means that:
@@ -211,9 +329,10 @@ class StandardizedPDBFixer(PDBFixer):
         if ligand_sdf:
             self.addLigand(ligand_sdf)
             self._has_ligand = True
+            
         else:
             self._has_ligand = False
-        
+        #print(self._has_ligand)
         self.mod_res_info = []
         self.missing_residues_added = []
         self.missing_residues_skipped = []
@@ -369,42 +488,126 @@ class StandardizedPDBFixer(PDBFixer):
             # TODO: need to figure out how to deal with modfied residues with insertion code (Eric)
             modres_lines.append(f"MODRES {pdb_id:>4} {res_name:3} {chain:1} {res_id:>4}{icode:1} {std_res_name:3}   MODIFIED RESIDUE")
         return modres_lines
-    
+
+    def _get_nonpro_peptide_omega_atom_quads(self):
+
+        atom_index_by_residue = {}
+
+        for residue in self.topology.residues():
+            atom_index_by_residue[residue.index] = {atom.name: atom.index for atom in residue.atoms()}
+
+        quads = []
+        residues = list(self.topology.residues())
+
+        for i in range(1, len(residues)):
+            res_prev = residues[i - 1]
+            res_curr = residues[i]
+
+            if res_prev.chain.index != res_curr.chain.index:
+                continue
+
+            if res_curr.name == 'PRO':
+                continue
+
+            names_prev = atom_index_by_residue[res_prev.index]
+            names_curr = atom_index_by_residue[res_curr.index]
+
+            if ('CA' in names_prev) and ('C' in names_prev) and ('N' in names_curr) and ('CA' in names_curr):
+                quads.append((
+                    names_prev['CA'],
+                    names_prev['C'],
+                    names_curr['N'],
+                    names_curr['CA'],
+                ))
+
+        return quads
+    def add_trans_peptide_restraints(self, system, omega_atom_quads, k_kj_per_mol=10.0):
+        import openmm as mm
+        from openmm import unit
+        force = mm.PeriodicTorsionForce()
+        k = k_kj_per_mol * unit.kilojoule_per_mole
+
+        for a, b, c, d in omega_atom_quads:
+            force.addTorsion(a, b, c, d, 1, 0.0, k)
+
+        system.addForce(force)
+        return force
+    def get_edge_residue_of_added_residue(self,missing_atoms_info_as_dict):
+        all_residues = list(self.topology.residues())
+
+        missing_residue_ids = set()
+        for chain, res_id, res_name in self.missing_residues_added:
+            missing_residue_ids.add((chain, int(res_id)))
+
+        for chain, res_id, res_name in missing_atoms_info_as_dict.keys():
+            missing_residue_ids.add((chain, int(res_id)))
+
+        edge_residue_ids = set(missing_residue_ids)
+        for chain, res_id in missing_residue_ids:
+            edge_residue_ids.add((chain, res_id - 1))
+            edge_residue_ids.add((chain, res_id + 1))
+        return edge_residue_ids
     def refineAddedAtomPositions(self, forcefield=None):
         if forcefield is None:
-            forcefield = app.ForceField('amber14-all.xml', 'tip3p.xml')
+            forcefield = app.ForceField('amber14-all.xml', 'amber14/tip3p.xml')
         # Conver List missing atoms information to dictionary, for better indexing
         missing_atoms_info_as_dict = defaultdict(list)
         for chain, res_id, res_name, atoms in self.missing_atoms_added:
             missing_atoms_info_as_dict[(chain, res_id, res_name)] += atoms
-        system = forcefield.createSystem(self.topology, nonbondedMethod=app.CutoffNonPeriodic, constraints=None, rigidWater=False)
         nonstd_names = [res.name for res, stdname in self.nonstandardResidues]
-        for residue in self.topology.residues():
+        system = forcefield.createSystem(self.topology, nonbondedMethod=app.CutoffNonPeriodic, constraints=None, rigidWater=False)
+        original_masses = [system.getParticleMass(i) for i in range(system.getNumParticles())]
+        #omega_atom_quads = self._get_nonpro_peptide_omega_atom_quads()
+        #peptide_trans_force = self.add_trans_peptide_restraints( # TODO even though this removes most of cis peptide bonds it can still happen that the cis persist, but further increasing the restrain results in unphysical modelling. likely we need staging.
+        #    system,
+        #    omega_atom_quads,
+        #    k_kj_per_mol=25.0,
+        #)
+        edge_residue_ids = self.get_edge_residue_of_added_residue(missing_atoms_info_as_dict)
+        for idx_residue, residue in enumerate(self.topology.residues()):
             resdata = (residue.chain.id, int(residue.id), residue.name)
             if resdata in self.missing_residues_added:
-                self.log(f'Found fixed residue: {residue}')
+                self.log(f'Found free residue: {residue}')
                 continue
-            
+
             for i, atom in enumerate(residue.atoms()):
                 # Always constrained all atoms in modified residue, including hydrogens (because we don't have good force field)
                 if residue.name in nonstd_names:
                     system.setParticleMass(atom.index, 0.0)
                     continue
                 if (resdata in missing_atoms_info_as_dict) and (atom.name in missing_atoms_info_as_dict[resdata]):
-                    self.log(f'Found fixed atom: {atom}')
+                    self.log(f'Found free atom: {atom}')
                     continue
                 if atom.element is app.element.hydrogen:
                     continue
                 if (self._has_ligand) and (residue.index == self.topology.getNumResidues() - 1) and (i in self.ligand_missing_atoms):
                     continue
+                
+                if (residue.chain.id, int(residue.id)) in edge_residue_ids:
+                    self.log(f'Found edge residue near missing content: {residue}')
+                    continue
                 system.setParticleMass(atom.index, 0.0)
 
         integrator = mm.LangevinIntegrator(300*unit.kelvin, 10/unit.picosecond, 5*unit.femtosecond)
-        context = mm.Context(system, integrator)
-        context.setPositions(self.positions)
-        mm.LocalEnergyMinimizer.minimize(context, tolerance=10)
-        self.positions = context.getState(getPositions=True).getPositions()
-        return self.positions
+        sim = app.Simulation(self.topology, system, integrator)
+        sim.context.setPositions(self.positions)
+        mm.LocalEnergyMinimizer.minimize(sim.context, tolerance=10)
+        for i, mass in enumerate(original_masses): # NOTE restore the mass
+            system.setParticleMass(i, mass)
+        sim.context.reinitialize(preserveState=True)
+        state = sim.context.getState(getPositions=True, 
+                                     getVelocities=True, 
+                                     getEnergy=True, 
+                                     getParameters=True)
+        self.positions = state.getPositions()
+        return {
+            'topology': self.topology,
+            'positions': self.positions,
+            'system': system,
+            'integrator': integrator,
+            'state': state,
+            'simulation': sim,
+        }
     
     def runFixWorkflow(
         self, 
@@ -415,7 +618,9 @@ class StandardizedPDBFixer(PDBFixer):
         skip_long_missing_residues: Optional[int] = 10,
         add_hydrogens: bool = True, 
         refine_positions: bool = True, 
-        res_num_mapping: Optional[Dict] = None
+        res_num_mapping: Optional[Dict] = None,
+        save_refinement_bundle: bool = True,
+        refinement_bundle_dir: Optional[os.PathLike] = None,
     ):
         """
         Parameters
@@ -451,45 +656,63 @@ class StandardizedPDBFixer(PDBFixer):
             self.topology = modeller.getTopology()
             self.positions = modeller.getPositions()
 
+        refinement_bundle_info = None
         if refine_positions:
             for top_xml in top_xmls:
                 app.Topology.loadBondDefinitions(top_xml)
             self.topology.createStandardBonds()
             try:
-                ff = app.ForceField('amber14-all.xml', 'tip3p.xml', *list(set(ff_xmls)))
+                ff = app.ForceField('amber14-all.xml', 'amber14/tip3p.xml', *list(set(ff_xmls)))
                 if self._has_ligand:
                     generator = SMIRNOFFTemplateGenerator(molecules=[self.off_mol]).generator
                     ff.registerTemplateGenerator(generator)
-                self.refineAddedAtomPositions(ff)
+                refinement_state = self.refineAddedAtomPositions(ff)
             except ValueError:
                 for residue in self.topology.residues():
                     if residue.name == 'PCA':
                         print(list(residue.atoms()), list(residue.bonds()))
                 # Some cases OpenFF will failed, use GAFF
-                ff = app.ForceField('amber14-all.xml', 'tip3p.xml', *list(set(ff_xmls)))
+                ff = app.ForceField('amber14-all.xml', 'amber14/tip3p.xml', *list(set(ff_xmls)))
                 if self._has_ligand:
                     generator = GAFFTemplateGenerator(molecules=[self.off_mol], forcefield='gaff-2.11').generator
                     ff.registerTemplateGenerator(generator)
-                self.refineAddedAtomPositions(ff)
+                refinement_state = self.refineAddedAtomPositions(ff)
 
-        
+            if save_refinement_bundle and (refinement_state is not None):
+                assert refinement_bundle_dir is not None, "ABORTED. refinement_bundle_dir must be assigned"
+                refinement_bundle_info = save_openmm_refinement_bundle(
+                    bundle_dir=refinement_bundle_dir,
+                    topology=refinement_state['topology'],
+                    positions=refinement_state['positions'],
+                    system=refinement_state['system'],
+                    integrator=refinement_state['integrator'],
+                    state=refinement_state['state'],
+                    metadata={
+                        'pdb_id': self.pdb_id,
+                        'output_protein': str(output_protein),
+                        'output_ligand': None if output_ligand is None else str(output_ligand),
+                        'has_ligand': bool(self._has_ligand),
+                    },
+                )
+
         if self._has_ligand:
+            #print([residue for residue in self.topology.residues()])
             protein = Structure(self.topology, self.positions).select_residues([residue for residue in self.topology.residues()][:-1])
             protein_top = protein.topology
             protein_pos = protein.positions
         else:
             protein_top = self.topology
             protein_pos = self.positions
-        
+
         # Save protein
         seqres = [(seq.chainId, convert_to_seqres(seq.residues, seq.chainId)) for seq in self.sequences]
         seqres.sort(key=lambda x: x[0])
         headers = [x[1] for x in seqres]
-        headers += StandardizedPDBFixer.getFixedResidueRemarks(self.missing_residues_skipped, res_num_mapping, use_fixed_remark=False)
+        #headers += StandardizedPDBFixer.getFixedResidueRemarks(self.missing_residues_skipped, res_num_mapping, use_fixed_remark=False)
         headers += StandardizedPDBFixer.getFixedResidueRemarks(self.missing_residues_added, res_num_mapping)
         headers += StandardizedPDBFixer.getFixedAtomRemarks(self.missing_atoms_added, res_num_mapping)
         headers += StandardizedPDBFixer.getModresRecords(self.mod_res_info, res_num_mapping, self.pdb_id)
-
+        #print(output_protein)
         fp = open(output_protein, 'w')
         app.PDBFile.writeHeader(protein_top, fp)
         for line in headers:
@@ -497,6 +720,7 @@ class StandardizedPDBFixer(PDBFixer):
         # map back residue id and icode
         if res_num_mapping:
             for residue in protein_top.residues():
+                #print(residue.chain.id, int(residue.id))
                 res_id = res_num_mapping[residue.chain.id][int(residue.id)]
                 if res_id[-1].isalpha():
                     insert_code = res_id[-1]
@@ -516,3 +740,5 @@ class StandardizedPDBFixer(PDBFixer):
                 self.rdmol.GetConformer().SetAtomPosition(i, [vec.x * 10, vec.y * 10, vec.z * 10])
             with Chem.SDWriter(output_ligand) as w:
                 w.write(self.rdmol)
+
+        return refinement_bundle_info
